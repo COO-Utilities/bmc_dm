@@ -5,6 +5,9 @@ DM-SDK and `hardware_device_base`. Every mirror is described by a config bundle:
 file with the actuator map, the flats and the last command beside it. This README covers
 everything needed to install, configure and run a mirror without reading the driver.
 
+Start with [the three mirror files](#the-three-mirror-files): they are all a new mirror
+needs besides the software.
+
 Contents:
 
 1. [Install](#1-install)
@@ -20,6 +23,91 @@ Contents:
 11. [Trying it without a mirror](#11-trying-it-without-a-mirror)
 12. [Troubleshooting](#12-troubleshooting)
 13. [Development](#13-development)
+
+## The three mirror files
+
+Every mirror needs three files. Everything else is software (section 1) or settings in a
+short TOML file that ties the three together (section 4).
+
+| | File | What it says | Where it comes from | Where it goes | Needed? |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `actuator_map.txt` | Which actuator sits at which cell of the mirror's square grid | Written once per mirror layout; BMC's circular kilo-DMs can be generated (below) | Bundle folder, beside the TOML | Yes |
+| 2 | Flat, e.g. `flat.npy` | The command that makes this mirror optically flat | Measured on your optical setup, e.g. with a wavefront sensor | Bundle folder, named in `[flats]` | For a flat mirror, yes; the driver also runs without one (pokes then start from zeros) |
+| 3 | Profile, `<serial>.dm`, e.g. `30CW009#052.dm` | The mirror and its driver electronics, for the SDK | BMC, with the mirror; one per serial number | SDK profiles folder, `/opt/Boston Micromachines/Profiles/` | Yes: `connect()` fails without it |
+
+### File 1: actuator map
+
+A plain text grid of integers: each cell holds the number of the actuator at that
+position (counted from 0, in BMC's actuator order), `-1` where there is no actuator. It
+lets the driver draw patterns on the grid and send them in the order the SDK expects.
+Full format in [section 4.3](#43-actuator-map-actuator_maptxt). For BMC's circular
+kilo-DMs (648 actuators on 28 x 28, 952 on 34 x 34), generate it:
+
+```python
+import numpy as np
+from bmc_dm import ActuatorMap
+
+np.savetxt("actuator_map.txt", ActuatorMap.circular(28).indices, fmt="%4d")
+```
+
+Do not confuse it with the SDK's own `.map` files in `/opt/Boston Micromachines/Map`.
+Those map driver channels to actuators (the wiring), are installed with the SDK, and are
+used inside the SDK only.
+
+### File 2: flat
+
+A `side x side` numpy surface (`.npy`), or a vector of one value per actuator in BMC's
+text format (`.txt`), with values from 0 to 1. A flat belongs to one mirror on one
+optical setup, so measure it there. A bundle can hold several, each with a name;
+the one named by `default_flat` (or the only one) is applied by `set_flat()` and is the
+base for every poke. Format in [section 4.4](#44-flats).
+
+### File 3: profile (`.dm`)
+
+BMC's description of the mirror: interface type (USB or PCIe), actuator count, voltage
+limits, the wiring map to use and any inactive actuators. The SDK reads it when
+`connect()` opens the mirror, finding it by serial number, so keep BMC's file name. The
+file is encoded (each byte XOR-ed with `0x83`); never edit it, but you can read it:
+
+```python
+from pathlib import Path
+
+raw = Path("/opt/Boston Micromachines/Profiles/30CW009#052.dm").read_bytes()
+print(bytes(b if b == 0x0A else b ^ 0x83 for b in raw).decode())
+```
+
+`type` is the interface (0 USB, 1 PCIe) and `size` the actuator count, which must match
+the actuator map. If BMC also supplied a `.map` file, copy it to
+`/opt/Boston Micromachines/Map/`. A calibration table (`.mat`) is not used by this driver.
+
+### Putting them together
+
+```
+my_dm/
+  my_dm.toml
+  actuator_map.txt
+  flat.npy
+```
+
+```toml
+[dm]
+serial_number = "30CW009#052"   # picks <serial>.dm from the SDK's profiles folder
+
+[limits]
+minimum = 0.0
+maximum = 0.8
+
+[flats]
+flat = "flat.npy"               # the only flat, so it is the default
+```
+
+```python
+from bmc_dm import BmcDmController
+
+dm = BmcDmController("my_dm/my_dm.toml")
+dm.connect()
+dm.set_flat()
+```
 
 ## 1. Install
 

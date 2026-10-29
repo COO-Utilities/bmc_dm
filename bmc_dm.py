@@ -666,21 +666,24 @@ class BmcDmController(HardwareDeviceBase):  # type: ignore[misc]
         1 / rate_hz. Ctrl-C stops early. bias is restored when done.
 
         :return: the wavefronts applied, one surface per step, without the bias
-        :raises ValueError: for Noll indices below 1, negative or mismatched amplitudes,
-            or rate_hz * duration_s below 1
+        :raises ValueError: for no or below-1 Noll indices, negative or mismatched
+            amplitudes, rate_hz <= 0, or rate_hz * duration_s below 1
         """
         noll_indices = np.atleast_1d(np.asarray(nolls, dtype=np.intp))
         scales = np.asarray(amplitudes, dtype=np.float64)
         steps = int(rate_hz * duration_s)
+        # Check sizes before min(), which fails on empty arrays
+        sizes_valid = noll_indices.size > 0 and scales.shape in ((), noll_indices.shape)
         if (
-            noll_indices.min() < 1
-            or scales.min() < 0
-            or scales.shape not in ((), noll_indices.shape)
+            rate_hz <= 0
             or steps < 1
+            or not sizes_valid
+            or noll_indices.min() < 1
+            or scales.min() < 0
         ):
             self._reject(
                 "simulate_turbulence needs Noll indices >= 1, one amplitude >= 0 (or one per "
-                "Noll index) and rate_hz * duration_s >= 1"
+                "Noll index), rate_hz > 0 and rate_hz * duration_s >= 1"
             )
         surface = self._bias(bias)
         wavefronts = _random_zernike_sums(self.actuator_map, noll_indices, scales, steps)

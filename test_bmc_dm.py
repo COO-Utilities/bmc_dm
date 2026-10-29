@@ -699,16 +699,28 @@ def test_simulate_turbulence(
 
 
 @pytest.mark.parametrize(
-    "nolls, amplitudes, rate_hz",
-    [([0, 4], 0.002, 5.0), ([4], 0.002, 0.05), ([4], -0.1, 5.0), ([4, 5], [0.1, 0.1, 0.1], 5.0)],
-    ids=["noll", "steps", "negative", "mismatched"],
+    "nolls, amplitudes, rate_hz, duration_s",
+    [
+        ([0, 4], 0.002, 5.0, 10.0),
+        ([], 0.002, 5.0, 10.0),
+        ([4], 0.002, 0.05, 10.0),
+        ([4], 0.002, -5.0, -10.0),
+        ([4], -0.1, 5.0, 10.0),
+        ([4], [], 5.0, 10.0),
+        ([4, 5], [0.1, 0.1, 0.1], 5.0, 10.0),
+    ],
+    ids=["noll", "no_nolls", "steps", "negative_rate", "negative", "no_amplitudes", "mismatched"],
 )
 def test_simulate_turbulence_rejects(
-    dm: BmcDmController, nolls: list[int], amplitudes: object, rate_hz: float
+    dm: BmcDmController,
+    nolls: list[int],
+    amplitudes: object,
+    rate_hz: float,
+    duration_s: float,
 ) -> None:
-    """Check bad Noll indices, amplitudes and runs too short for one step are rejected"""
+    """Check bad Noll indices, amplitudes, rates and runs too short for one step are rejected"""
     with pytest.raises(ValueError, match="simulate_turbulence needs"):
-        dm.simulate_turbulence(nolls, amplitudes, rate_hz)  # type: ignore[arg-type]
+        dm.simulate_turbulence(nolls, amplitudes, rate_hz, duration_s)  # type: ignore[arg-type]
     assert not _sdk().sent and dm.get_status()[0] == -1
 
 
