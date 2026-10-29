@@ -1,0 +1,32 @@
+# Sight BMC DM: BmcDmController("configs/sight/sight.toml")
+# actuator_map.txt and the flats sit beside this file; unknown keys are rejected
+
+[dm]
+name = "Sight DM"
+serial_number = "30CW009#052"
+# Flat applied by set_flat() and initialize(), and the default bias for pokes
+default_flat = "inst"
+
+[limits]
+# Normalized commands; the hardware range is 0 to 1
+minimum = 0.0
+maximum = 0.8
+
+[flats]
+# Name = file beside this one: a .npy surface or a BMC .txt vector
+inst = "inst.npy"          # Sight_INST_flat.npy
+quick = "quick.npy"        # SightDM_2024Oct4_QuickFlat.npy
+mean250 = "mean250.npy"    # SightDM_2024Oct7_Mean250.npy
+mean400 = "mean400.npy"    # SightDM_2024Oct7_Mean400.npy
+mean500 = "mean500.npy"    # SightDM_2024Oct7_Mean500.npy
+mean600 = "mean600.npy"    # SightDM_2024Oct7_Mean600.npy
+mean700 = "mean700.npy"    # SightDM_2024Oct7_Mean700.npy, peaks at 0.9 so it is clipped to 0.8
+
+[sdk]
+# Only needed when the SDK or the DM's profile is outside the default install
+# profiles_path = "/opt/Boston Micromachines/Profiles"
+# maps_path = "/opt/Boston Micromachines/Map"
+
+[log]
+# Defaults to bmc_dm.log in the working directory
+# file = "logs/bmc_dm.log"

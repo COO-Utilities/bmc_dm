@@ -1,44 +1,35 @@
 [build-system]
-# Specifies the build system to use. 
-requires = ["setuptools>=42"]
+requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-# Basic information about your project.
-name = "your-package-name" 
-version = "0.1.0" 
-dependencies = []
-requires-python = ">=3.7"
-authors = [
-  {name = "Your Name", email = "your.email@example.com"}
-]
-maintainers = [
-  {name = "Your Name", email = "your.email@example.com"}
-]
-description = "A brief description of your package"
-readme = "README.md" 
+name = "bmc_dm"
+version = "0.1.0"
+description = "Single-file driver for BMC deformable mirrors, configured by TOML bundles"
+readme = "README.md"
 license = { text = "MIT" }
-keywords = ["example", "package", "keywords"] 
-classifiers = [
-  "Programming Language :: Python"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=1.26",
+    "hardware_device_base@git+https://github.com/COO-Utilities/hardware_device_base@v1.0.1",
 ]
-
-[project.urls]
-# Various URLs related to your project. These links are displayed on PyPI.
-Homepage = "https://example.com" 
-Documentation = "https://readthedocs.org"
-Repository = "https://github.com/yourusername/your-repo"
-"Bug Tracker" = "https://github.com/yourusername/your-repo/issues" 
-Changelog = "https://github.com/yourusername/your-repo/blob/master/CHANGELOG.md"
-
-[project.scripts]
-# Defines command-line scripts for your package. Replace with your script and function.
-your-command = "your_module:your_function"
 
 [project.optional-dependencies]
-# Optional dependencies that can be installed with extra tags, like "dev".
-dev = [
-  "pytest", 
-  "black",
-  "flake8"
-]
+zernike = ["poppy"]
+dev = ["pytest>=8", "pylint>=3", "mypy>=1.10", "ruff>=0.6"]
+
+[tool.setuptools]
+py-modules = ["bmc_dm"]
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+
+[tool.mypy]
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["bmc", "hardware_device_base", "poppy"]
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 100

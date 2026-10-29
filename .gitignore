@@ -169,3 +169,7 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Last command the driver saves beside each config bundle
+last_command.npy
+.last_command.npy.tmp
