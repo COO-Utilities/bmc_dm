@@ -13,6 +13,7 @@ Hardware notes:
     * connect() sends no commands. disconnect() sends none either, but the SDK's
       close_dm() (and its BmcDm destructor) zeroes and disables the DACs, so call
       restore() after connect() to put the saved shape back.
+    * status_report() summarizes what was sent without calling the SDK.
     * Needs the BMC DM-SDK Python module ``bmc`` (installed under
       /opt/Boston Micromachines/lib/python3) and the DM's profile from
       BMC. Zernikes need poppy (the zernike extra).
@@ -23,6 +24,8 @@ import time
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 from types import MappingProxyType, TracebackType
@@ -404,6 +407,44 @@ def _poppy_zernikes(terms: int, side: int) -> FloatArray:
     return _read_only(basis[:, 1:-1, 1:-1])
 
 
+class MirrorState(StrEnum):
+    """What the mirror holds, inferred from the commands sent (BMC DMs have no readback)"""
+
+    OFF = "off"  # Disconnected: the SDK zeroed the DACs and turned HV off
+    ZEROED = "zeroed"  # Connected with nothing sent yet, so every actuator is at 0
+    HOLDING = "holding"  # The last command is on the mirror
+
+
+@dataclass(frozen=True)
+class StatusReport:
+    """Snapshot from BmcDmController.status_report(); command statistics are None when off"""
+
+    mirror_state: MirrorState
+    last_command_at: datetime | None  # UTC; None from connect() until the first command
+    last_message: str
+    minimum: float | None = None
+    maximum: float | None = None
+    at_limit: int | None = None  # Actuators at either soft limit
+    max_neighbor_step: float | None = None  # Between grid neighbors, in command units
+
+    def summary(self) -> str:
+        """Return the report as one log line"""
+        if self.minimum is None:
+            return str(self.mirror_state)
+        return (
+            f"{self.mirror_state}: {self.minimum:.3f} to {self.maximum:.3f}, "
+            f"{self.at_limit} at a limit, largest neighbor step {self.max_neighbor_step:.3f}"
+        )
+
+
+def _max_neighbor_step(actuator_map: ActuatorMap, vector: FloatArray) -> float:
+    """Return the largest difference between actuators that are grid neighbors"""
+    surface, mask = actuator_map.to_surface(vector), actuator_map.mask
+    rows_step = np.abs(np.diff(surface, axis=0))[mask[1:] & mask[:-1]]
+    columns_step = np.abs(np.diff(surface, axis=1))[mask[:, 1:] & mask[:, :-1]]
+    return float(np.max(np.concatenate((rows_step, columns_step)), initial=0.0))
+
+
 class BmcDmController(HardwareDeviceBase):  # type: ignore[misc]
     """Control a BMC deformable mirror through the BMC DM-SDK
 
@@ -432,6 +473,7 @@ class BmcDmController(HardwareDeviceBase):  # type: ignore[misc]
         self._device: Any = None
         self._no_error = 0
         self._last_command: FloatArray | None = None
+        self._last_command_at: datetime | None = None
 
     @property
     def actuator_map(self) -> ActuatorMap:
@@ -498,8 +540,11 @@ class BmcDmController(HardwareDeviceBase):  # type: ignore[misc]
                 )
             self._device = device
             self._last_command = self._read_reply() if saved is None else saved
+            self._last_command_at = None
             self._set_connected(True)
-        self.report_info(f"Connected to {self.config.name} {serial}")
+        self.report_info(
+            f"Connected to {self.config.name} {serial}, {self.status_report().summary()}"
+        )
 
     def disconnect(self) -> None:
         """Close the DM without sending a zero command
@@ -701,6 +746,35 @@ class BmcDmController(HardwareDeviceBase):  # type: ignore[misc]
             self.set_surface(surface)
         return wavefronts[:applied]
 
+    def status_report(self) -> StatusReport:
+        """Summarize what the mirror was sent, without calling the SDK (safe from any thread)
+
+        BMC mirrors cannot be read back. While ZEROED, the statistics describe the shape
+        restore() would send.
+        """
+        with self.lock:
+            command, sent_at = self._last_command, self._last_command_at
+            if self._device is None:
+                state = MirrorState.OFF
+            elif sent_at is None:
+                state = MirrorState.ZEROED
+            else:
+                state = MirrorState.HOLDING
+            last_message = self.status_string
+        if command is None:
+            return StatusReport(
+                mirror_state=state, last_command_at=sent_at, last_message=last_message
+            )
+        return StatusReport(
+            mirror_state=state,
+            last_command_at=sent_at,
+            last_message=last_message,
+            minimum=float(command.min()),
+            maximum=float(command.max()),
+            at_limit=int(np.count_nonzero(np.isin(command, self.config.soft_limits))),
+            max_neighbor_step=_max_neighbor_step(self.actuator_map, command),
+        )
+
     def _send_command(self, vector: FloatArray) -> bool:  # pylint: disable=arguments-differ
         """Send a prepared command vector to the SDK, then record and save it"""
         with self.lock:
@@ -709,7 +783,7 @@ class BmcDmController(HardwareDeviceBase):  # type: ignore[misc]
                 self._raise_dm_error("DM is not connected")
             # BMC's Python examples pass plain lists to send_data
             self._check(self._device, self._device.send_data(vector.tolist()), "send the command")
-            self._last_command = vector
+            self._last_command, self._last_command_at = vector, datetime.now(UTC)
             self._save_command(vector)
         return True
 

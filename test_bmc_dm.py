@@ -19,6 +19,7 @@ from bmc_dm import (
     ConfigError,
     DMConfig,
     DMError,
+    MirrorState,
     actuators,
     columns,
     crosshair,
@@ -490,8 +491,11 @@ def test_reconnect_loads_the_saved_command(tmp_path: Path) -> None:
     sdk = FakeBmcDm.instances[-1]
     assert not sdk.sent
     np.testing.assert_array_equal(second.get_vector(), 0.5)
+    pending = second.status_report()
+    assert pending.mirror_state == MirrorState.ZEROED and pending.maximum == 0.5
     second.restore()
     assert sdk.sent == [[0.5] * 648]
+    assert second.status_report().mirror_state == MirrorState.HOLDING
     second.add(actuators, 0.1, indices=0)
     assert sdk.sent[-1][0] == pytest.approx(0.6) and sdk.sent[-1][1] == 0.5
 
@@ -751,6 +755,39 @@ def test_disconnect_while_other_threads_send(dm: BmcDmController) -> None:
 
     assert not errors
     assert _sdk().close_count == 1 and _sdk().sends_after_close == 0
+
+
+# Controller: status
+
+
+def test_status_report_follows_the_session(config: DMConfig) -> None:
+    """Check the state goes off, zeroed, holding, off, with statistics only while connected"""
+    dm = BmcDmController(config, log=False)
+    assert dm.status_report().summary() == "off"
+    dm.connect()
+    zeroed = dm.status_report()
+    assert zeroed.mirror_state == MirrorState.ZEROED and zeroed.last_command_at is None
+    assert zeroed.summary() == "zeroed: 0.000 to 0.000, 648 at a limit, largest neighbor step 0.000"
+    dm.set_flat()
+    holding = dm.status_report()
+    assert holding.mirror_state == MirrorState.HOLDING and holding.last_command_at is not None
+    assert holding.last_command_at.tzinfo is not None
+    dm.disconnect()
+    off = dm.status_report()
+    assert off.mirror_state == MirrorState.OFF and off.maximum is None
+
+
+def test_status_report_statistics(dm: BmcDmController) -> None:
+    """Check the statistics describe the clipped command and skip cells without actuators"""
+    dm.set_vector(np.full(648, 0.5))
+    assert dm.status_report().max_neighbor_step == 0.0
+    command = np.full(648, 0.1)
+    command[0] = 0.9
+    dm.set_vector(command)
+    report = dm.status_report()
+    assert (report.minimum, report.maximum, report.at_limit) == (0.1, 0.8, 1)
+    assert report.max_neighbor_step == pytest.approx(0.7)
+    assert report.last_message.startswith("Clipped 1 of 648")
 
 
 # Patterns
