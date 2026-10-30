@@ -1,17 +1,152 @@
 # bmc_dm
 
 Python driver for Boston Micromachines (BMC) deformable mirrors (DMs), built on BMC's
-DM-SDK and `hardware_device_base`. Every mirror is described by a config bundle: a TOML
-file with the actuator map, the flats and the last command beside it. This README covers
-everything needed to install, configure and run a mirror without reading the driver.
+DM-SDK and `hardware_device_base`. The quick start below takes you from the three mirror
+files to a running mirror; everything after it is reference.
 
-Start with [the three mirror files](#the-three-mirror-files): they are all a new mirror
-needs besides the software.
+## Quick start
 
-Contents:
+### What you need
 
-1. [Install](#1-install)
-2. [Quick start](#2-quick-start)
+| File | What it is | Where it comes from |
+| --- | --- | --- |
+| `<serial>.dm`, e.g. `30CW009#052.dm` | The mirror's profile, read by BMC's SDK | BMC, with the mirror |
+| `actuator_map.txt` | Which actuator sits at which cell of the mirror's square grid | You; for BMC's circular kilo-DMs, generate it in step 3 |
+| A flat, e.g. `flat.npy` | The command that makes the mirror optically flat, as a square grid | Measured on your optical setup |
+
+Also: an Ubuntu 26.04 machine and `dm-sdk-4.1.3-ubuntu26.tar.gz`, BMC's DM-SDK patched
+for Ubuntu 26.04. Steps 1 and 2 are done once per machine, step 3 once per mirror.
+
+### Step 1: install BMC's SDK
+
+Check whether the mirror uses USB or PCIe: the profile's `type` line says `type=0` for
+USB, `type=1` for PCIe.
+
+```bash
+python3 -c "import sys; print(bytes(b if b == 10 else b ^ 0x83 for b in open(sys.argv[1], 'rb').read()).decode())" 30CW009#052.dm
+```
+
+Then build and install the SDK. Extract it into a path **without spaces**, or the build
+fails. For PCIe, use the `--pcie` variants and install the kernel headers.
+
+```bash
+sudo apt install build-essential qtbase5-dev qt5-qmake liblog4cxx-dev \
+  libboost-dev libncurses-dev libpython3-dev zlib1g-dev libusb-1.0-0-dev \
+  swig libopencv-dev libtbb12 libatlas3-base
+sudo apt install linux-headers-$(uname -r)    # PCIe only
+
+mkdir -p ~/src && tar xzf dm-sdk-4.1.3-ubuntu26.tar.gz -C ~/src
+cd ~/src/dm-sdk-4.1.3-ubuntu26
+./build.sh                                     # PCIe: ./build.sh --pcie
+sudo ./install.sh                              # PCIe: sudo ./install.sh --pcie
+sudo cp /path/to/30CW009#052.dm "/opt/Boston Micromachines/Profiles/"
+```
+
+For USB, unplug and replug the mirror's driver once so the new permissions apply.
+
+### Step 2: install this driver
+
+```bash
+git clone git@github.com:COO-Utilities/bmc_dm.git
+cd bmc_dm
+python3 -m venv .venv          # the system python3, which the SDK was built for
+source .venv/bin/activate
+pip install -e ".[zernike]"
+echo "/opt/Boston Micromachines/lib/python3" \
+  > "$(python -c 'import site; print(site.getsitepackages()[0])')/bmc_sdk.pth"
+python -c "import bmc; print(bmc.BmcDm().version_string())"    # prints 4.1.3
+```
+
+### Step 3: make the mirror's config bundle
+
+A bundle is a folder with a short TOML file and the two other files beside it. (For the
+Sight mirror it already exists: use `configs/sight/sight.toml` and skip this step.)
+
+```bash
+mkdir -p configs/my_dm
+cp /path/to/flat.npy configs/my_dm/flat.npy
+cp /path/to/actuator_map.txt configs/my_dm/actuator_map.txt
+```
+
+For a BMC circular kilo-DM, generate the actuator map instead of copying it (28 for a
+648-actuator mirror, 34 for 952):
+
+```bash
+python -c "import numpy as np; from bmc_dm import ActuatorMap; np.savetxt('configs/my_dm/actuator_map.txt', ActuatorMap.circular(28).indices, fmt='%4d')"
+```
+
+Write `configs/my_dm/my_dm.toml`:
+
+```toml
+[dm]
+serial_number = "30CW009#052"   # the profile's file name without .dm
+
+[limits]
+minimum = 0.0                   # no actuator is ever sent less than this
+maximum = 0.8                   # or more than this (the hardware range is 0 to 1)
+
+[flats]
+flat = "flat.npy"               # the only flat, so set_flat() and pokes use it
+```
+
+Check the bundle without touching the mirror; a problem raises `ConfigError` naming the
+file:
+
+```bash
+python -c "from bmc_dm import BmcDmController; BmcDmController('configs/my_dm/my_dm.toml', log=False)"
+```
+
+### Step 4: run the mirror
+
+```python
+import numpy as np
+from bmc_dm import BmcDmController, actuators, letter_f, zernike
+
+dm = BmcDmController("configs/my_dm/my_dm.toml")
+dm.connect()  # opens the mirror; sends nothing
+dm.set_flat()  # apply the flat
+
+dm.poke(letter_f, -0.1)  # flat - 0.1 on an F: check the orientation on the camera
+dm.poke(actuators, -0.1, indices=[0, 100])  # flat - 0.1 on actuators 0 and 100
+dm.poke(zernike, 0.2, noll=5)  # flat + 0.2 x astigmatism
+dm.add(zernike, 0.05, noll=4)  # plus 0.05 x focus, on top of the last command
+dm.set_surface(np.full(dm.actuator_map.shape, 0.4))  # any square grid of values
+dm.flash_edge()  # blink the pupil edge for 12 s, then back to the flat
+print(dm.get_surface())  # the last command sent
+
+dm.disconnect()  # the SDK zeroes the mirror as it closes
+```
+
+In the next session, pick up where the last one left off:
+
+```python
+from bmc_dm import BmcDmController
+
+dm = BmcDmController("configs/my_dm/my_dm.toml")
+dm.connect()
+dm.restore()  # send the previous session's last command again
+```
+
+### Good to know
+
+- **Units:** commands run from 0 to 1. Every command is clipped to `[limits]` before it
+  is sent, with a warning. `poke` amplitudes are in the same units, on unit-sized
+  patterns.
+- **Actuators** are numbered from 0.
+- **Disconnecting zeroes the mirror**, and so does exiting Python: the mirror holds a
+  shape only while it stays connected. Every command is saved as `last_command.npy` in
+  the bundle, so `restore()` can bring it back.
+- **The driver cannot measure the mirror**: `get_surface()` is what was commanded, not
+  what the mirror does.
+- **Errors:** `DMError` for the SDK or the connection, `ValueError` for bad input,
+  `ConfigError` for a bad bundle. See [troubleshooting](#12-troubleshooting) for fixes.
+- **No mirror yet?** [Section 11](#11-trying-it-without-a-mirror) runs everything on the
+  SDK's dummy driver.
+
+## Reference
+
+1. [The three mirror files](#1-the-three-mirror-files)
+2. [Install](#2-install)
 3. [Concepts](#3-concepts)
 4. [Config bundle](#4-config-bundle)
 5. [Controller reference](#5-controller-reference)
@@ -24,10 +159,10 @@ Contents:
 12. [Troubleshooting](#12-troubleshooting)
 13. [Development](#13-development)
 
-## The three mirror files
+## 1. The three mirror files
 
-Every mirror needs three files. Everything else is software (section 1) or settings in a
-short TOML file that ties the three together (section 4).
+Every mirror needs three files. Everything else is software (section 2) or settings in a
+short TOML file that ties the three together (section 4, or quick start step 3).
 
 | | File | What it says | Where it comes from | Where it goes | Needed? |
 | --- | --- | --- | --- | --- | --- |
@@ -35,7 +170,7 @@ short TOML file that ties the three together (section 4).
 | 2 | Flat, e.g. `flat.npy` | The command that makes this mirror optically flat | Measured on your optical setup, e.g. with a wavefront sensor | Bundle folder, named in `[flats]` | For a flat mirror, yes; the driver also runs without one (pokes then start from zeros) |
 | 3 | Profile, `<serial>.dm`, e.g. `30CW009#052.dm` | The mirror and its driver electronics, for the SDK | BMC, with the mirror; one per serial number | SDK profiles folder, `/opt/Boston Micromachines/Profiles/` | Yes: `connect()` fails without it |
 
-### File 1: actuator map
+### 1.1 Actuator map
 
 A plain text grid of integers: each cell holds the number of the actuator at that
 position (counted from 0, in BMC's actuator order), `-1` where there is no actuator. It
@@ -54,7 +189,7 @@ Do not confuse it with the SDK's own `.map` files in `/opt/Boston Micromachines/
 Those map driver channels to actuators (the wiring), are installed with the SDK, and are
 used inside the SDK only.
 
-### File 2: flat
+### 1.2 Flat
 
 A `side x side` numpy surface (`.npy`), or a vector of one value per actuator in BMC's
 text format (`.txt`), with values from 0 to 1. A flat belongs to one mirror on one
@@ -62,7 +197,7 @@ optical setup, so measure it there. A bundle can hold several, each with a name;
 the one named by `default_flat` (or the only one) is applied by `set_flat()` and is the
 base for every poke. Format in [section 4.4](#44-flats).
 
-### File 3: profile (`.dm`)
+### 1.3 Profile (`.dm`)
 
 BMC's description of the mirror: interface type (USB or PCIe), actuator count, voltage
 limits, the wiring map to use and any inactive actuators. The SDK reads it when
@@ -80,45 +215,16 @@ print(bytes(b if b == 0x0A else b ^ 0x83 for b in raw).decode())
 the actuator map. If BMC also supplied a `.map` file, copy it to
 `/opt/Boston Micromachines/Map/`. A calibration table (`.mat`) is not used by this driver.
 
-### Putting them together
+## 2. Install
 
-```
-my_dm/
-  my_dm.toml
-  actuator_map.txt
-  flat.npy
-```
-
-```toml
-[dm]
-serial_number = "30CW009#052"   # picks <serial>.dm from the SDK's profiles folder
-
-[limits]
-minimum = 0.0
-maximum = 0.8
-
-[flats]
-flat = "flat.npy"               # the only flat, so it is the default
-```
-
-```python
-from bmc_dm import BmcDmController
-
-dm = BmcDmController("my_dm/my_dm.toml")
-dm.connect()
-dm.set_flat()
-```
-
-## 1. Install
-
-You need:
+The quick start's steps 1 and 2 in detail. You need:
 
 - the BMC DM-SDK, with its Python module `bmc`
 - your mirror's profile file (`<serial>.dm`), supplied by BMC with the mirror
 - Python 3.12 or newer, the same Python the SDK's module was built for
 - this driver, which pulls in numpy, `hardware_device_base` and optionally poppy
 
-### 1.1 BMC DM-SDK (suggested: the Ubuntu 26.04 build)
+### 2.1 BMC DM-SDK (suggested: the Ubuntu 26.04 build)
 
 Any DM-SDK 4.x install works as long as `import bmc` works in the driver's Python. On
 Ubuntu 26.04 the suggested source is `dm-sdk-4.1.3-ubuntu26.tar.gz`: BMC's DM-SDK 4.1.3
@@ -179,7 +285,7 @@ PCIe notes: the kernel module is built for the running kernel, so rerun
 fails with "Key was rejected by service", Secure Boot is blocking the unsigned module:
 disable Secure Boot or sign the module with a MOK key.
 
-### 1.2 The driver
+### 2.2 The driver
 
 ```bash
 git clone git@github.com:COO-Utilities/bmc_dm.git
@@ -200,7 +306,7 @@ echo "/opt/Boston Micromachines/lib/python3" \
   > "$(python -c 'import site; print(site.getsitepackages()[0])')/bmc_sdk.pth"
 ```
 
-### 1.3 Check the install
+### 2.3 Check the install
 
 ```bash
 python -c "import bmc; print(bmc.BmcDm().version_string())"   # prints 4.1.3
@@ -209,25 +315,6 @@ python -c "from bmc_dm import BmcDmController; BmcDmController('configs/sight/si
 
 The first line loads the SDK without touching the mirror. The second loads and checks the
 Sight config bundle, also without hardware.
-
-## 2. Quick start
-
-```python
-from bmc_dm import BmcDmController, actuators, letter_f, zernike
-
-with BmcDmController("configs/sight/sight.toml") as dm:
-    dm.connect()  # opens the mirror, sends nothing
-    print(dm.get_surface())  # the previous session's last command
-    dm.restore()  # send it again (the SDK zeroed it on close)
-
-    dm.set_flat()  # apply the default flat
-    dm.poke(letter_f, -0.1)  # flat - 0.1 on an F, to check orientation
-    dm.poke(zernike, 0.2, noll=5)  # flat + 0.2 x astigmatism
-    dm.add(zernike, 0.05, noll=4)  # plus 0.05 x focus, on top of the last command
-    dm.poke(actuators, -0.1, indices=[390, 393, 395])
-    dm.flash_edge()  # blink the pupil edge, then restore the flat
-# leaving the block disconnects; the SDK zeroes the mirror as it closes
-```
 
 ## 3. Concepts
 
@@ -636,7 +723,8 @@ works:
 
 ## 10. The Sight bundle
 
-`configs/sight/` describes the Sight testbed's mirror:
+`configs/sight/` describes the Sight testbed's mirror. Use it as the quick start's bundle:
+`BmcDmController("configs/sight/sight.toml")`.
 
 | | |
 | --- | --- |
@@ -696,17 +784,17 @@ SDK's own readback (`get_actuator_data()`) stays at zero.
 | Symptom | Cause and fix |
 | --- | --- |
 | `DMError: BMC DM-SDK Python module (bmc) is not installed` | `import bmc` failed. Run `python -c "import bmc"` to see why, then use the rows below |
-| `No module named 'bmc'` | The venv cannot see the SDK. Add the `.pth` file (section 1.2), or install the SDK (1.1) |
+| `No module named 'bmc'` | The venv cannot see the SDK. Add the `.pth` file (section 2.2), or install the SDK (2.1) |
 | `libBMC.so.4: cannot open shared object file` | The SDK's libraries are not registered. Rerun `sudo ./install.sh`, or set `LD_LIBRARY_PATH="/opt/Boston Micromachines/lib"` |
 | `import bmc` crashes or reports an undefined symbol | Most likely the venv's Python differs from the one the SDK was built for. Create the venv with the system `python3` |
-| `Failed to open DM ...: Error opening file.` | No `<serial>.dm` in the profiles folder. Copy BMC's profile (1.1 step 5) or set `[sdk] profiles_path` |
+| `Failed to open DM ...: Error opening file.` | No `<serial>.dm` in the profiles folder. Copy BMC's profile (2.1 step 5) or set `[sdk] profiles_path` |
 | `Failed to open DM ...: An invalid serial number was entered.` | The serial is not 11 characters. Check `[dm] serial_number` or the `connect()` argument |
 | `DM ... has N actuators, the ... actuator map has M` | The bundle does not match the mirror (or the profile). Use the right bundle |
 | Opening a USB DM fails with a permissions or access error | udev rules not applied. Unplug and replug the driver after installing |
 | `ModuleNotFoundError: No module named 'poppy'` | Zernikes and turbulence need poppy: `pip install -e ".[zernike]"` |
 | `Clipped N of 648 values to [0.0, 0.8]` | The command went past the soft limits; the clipped command was sent. Lower the amplitude or bias |
 | `Ignoring saved command ...` | `last_command.npy` was invalid and was ignored; the next command overwrites it |
-| The mirror is flat after `connect()` | Expected: the SDK zeroed it when the last session closed. Call `restore()` |
+| The mirror is at zero after `connect()` | Expected: the SDK zeroed it when the last session closed. Call `restore()` |
 | SDK build fails at the SWIG or Python step | The source folder path contains a space. Move it to a path without spaces |
 | PCIe `modprobe` fails: "Key was rejected by service" | Secure Boot blocks the module. Disable Secure Boot or sign the module |
 
