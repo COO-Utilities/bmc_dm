@@ -138,6 +138,9 @@ dm.restore()  # send the previous session's last command again
   the bundle, so `restore()` can bring it back.
 - **The driver cannot measure the mirror**: `get_surface()` is what was commanded, not
   what the mirror does.
+- **Status:** `print(dm.status_report().summary())` shows whether the mirror is off,
+  zeroed or holding a shape, and that shape's range (see
+  [5.7](#57-status-logging-and-threads)).
 - **Errors:** `DMError` for the SDK or the connection, `ValueError` for bad input,
   `ConfigError` for a bad bundle. See [troubleshooting](#12-troubleshooting) for fixes.
 - **No mirror yet?** [Section 11](#11-trying-it-without-a-mirror) runs everything on the
@@ -604,6 +607,25 @@ wavefronts = dm.simulate_turbulence(range(4, 30), amplitudes=0.002, rate_hz=5, d
 ```
 
 ### 5.7 Status, logging and threads
+
+`dm.status_report()` returns a snapshot of what the mirror was sent. It never calls the
+SDK, so it is safe from any thread, connected or not.
+
+```python
+print(dm.status_report().summary())
+# holding: 0.362 to 0.556, 0 at a limit, largest neighbor step 0.136
+```
+
+| Field | Meaning |
+| --- | --- |
+| `mirror_state` | `off` (disconnected: zeroed, HV off), `zeroed` (connected, nothing sent yet, so every actuator is at 0) or `holding` (the last command is on the mirror) |
+| `last_command_at` | UTC time of the last command this session, or `None` |
+| `minimum`, `maximum` | Range of the last command. While `zeroed`, this is the saved shape `restore()` would send |
+| `at_limit` | Actuators at either soft limit |
+| `max_neighbor_step` | Largest difference between neighboring actuators |
+| `last_message` | The latest log message, as in `get_status()` |
+
+The command statistics are `None` while `off`. `connect()` logs the summary.
 
 - `get_status()` returns `(code, message)` for the latest message: code `-1` after an
   error, `0` otherwise.
